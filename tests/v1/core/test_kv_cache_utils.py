@@ -3344,6 +3344,45 @@ def test_page_size_padded_wins():
     assert spec.page_size_bytes == 65536
 
 
+@pytest.mark.parametrize(
+    ("model_version", "expected_bytes_per_token"),
+    [
+        (None, 656),
+        ("deepseek_v4", 584),
+        ("glm_nope", 528),
+    ],
+)
+def test_mla_fp8_ds_mla_page_sizes_by_layout(
+    model_version: str | None, expected_bytes_per_token: int
+):
+    spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512 if model_version == "glm_nope" else 576,
+        dtype=torch.uint8,
+        cache_dtype_str="fp8_ds_mla",
+        model_version=model_version,
+    )
+
+    assert spec.real_page_size_bytes == 64 * expected_bytes_per_token
+    assert spec.page_size_bytes == spec.real_page_size_bytes
+
+
+def test_sliding_window_mla_fp8_ds_mla_glm_nope_page_size():
+    spec = SlidingWindowMLASpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        cache_dtype_str="fp8_ds_mla",
+        sliding_window=128,
+        model_version="glm_nope",
+    )
+
+    assert spec.real_page_size_bytes == 64 * 528
+    assert spec.page_size_bytes == spec.real_page_size_bytes
+
+
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec(block_size=64)

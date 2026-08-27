@@ -9,7 +9,7 @@ Known Issues:
 """
 
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -25,6 +25,7 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
+    MLACommonBaseImpl,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
 )
@@ -77,11 +78,18 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     layer = SimpleNamespace(
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        kv_lora_rank=512,
         non_causal_multi_token_decode=False,
         sliding_window=None,
     )
     vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=64), model_config=None
+        cache_config=SimpleNamespace(block_size=64, cache_dtype=cache_dtype),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="deepseek_v3")
+        ),
     )
 
     spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
@@ -91,6 +99,131 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
         assert spec.page_size_bytes == 64 * 656
+
+
+def test_mla_kv_cache_spec_marks_glm_nope_layout():
+    layer = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        head_size=512,
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=0,
+        kv_lora_rank=512,
+        non_causal_multi_token_decode=False,
+        sliding_window=None,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="fp8_ds_mla"),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                model_type="glm5_next",
+                qk_nope_head_dim=256,
+                qk_rope_head_dim=0,
+                kv_lora_rank=512,
+            ),
+        ),
+    )
+
+    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+
+    assert isinstance(spec, MLAAttentionSpec)
+    assert spec.model_version == "glm_nope"
+    assert spec.page_size_bytes == 128 * 528
+
+
+def test_mla_kv_cache_spec_prefers_text_config_for_glm_nope_layout():
+    layer = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        head_size=512,
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=0,
+        kv_lora_rank=512,
+        non_causal_multi_token_decode=False,
+        sliding_window=None,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64, cache_dtype="fp8_ds_mla"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="glm5_next"),
+            hf_text_config=SimpleNamespace(
+                model_type="deepseek_v3",
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                kv_lora_rank=512,
+            ),
+        ),
+    )
+
+    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+
+    assert spec.model_version is None
+    assert spec.page_size_bytes == 64 * 656
+
+
+def test_fp8_ds_mla_gather_uses_glm_nope_helper_for_528_byte_cache(monkeypatch):
+    calls: list[str] = []
+    flashinfer_module = ModuleType("flashinfer")
+    flashinfer_mla_module = ModuleType("flashinfer.mla")
+    cache_module = ModuleType("flashinfer.mla._sparse_mla_sm120_cache")
+
+    def fake_gather(*args, **kwargs):
+        calls.append("glm")
+
+    cache_module.glm_nope_gather_and_dequantize = fake_gather
+    monkeypatch.setitem(sys.modules, "flashinfer", flashinfer_module)
+    monkeypatch.setitem(sys.modules, "flashinfer.mla", flashinfer_mla_module)
+    monkeypatch.setitem(
+        sys.modules, "flashinfer.mla._sparse_mla_sm120_cache", cache_module
+    )
+    monkeypatch.setattr(
+        ops,
+        "cp_gather_and_upconvert_fp8_kv_cache",
+        lambda **kwargs: calls.append("vllm"),
+    )
+    layer = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=0,
+        kv_lora_rank=512,
+    )
+
+    MLACommonBaseImpl._gather_fp8_ds_mla_context(
+        layer,
+        torch.empty((1, 64, 528), dtype=torch.uint8),
+        torch.empty((1, 512), dtype=torch.bfloat16),
+        torch.empty((1, 1), dtype=torch.int32),
+        torch.empty((1,), dtype=torch.int32),
+        1,
+        torch.empty((1,), dtype=torch.int32),
+    )
+
+    assert calls == ["glm"]
+
+
+def test_fp8_ds_mla_gather_falls_back_for_non_glm_nope_cache(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ops,
+        "cp_gather_and_upconvert_fp8_kv_cache",
+        lambda **kwargs: calls.append("vllm"),
+    )
+    layer = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=0,
+        kv_lora_rank=512,
+    )
+
+    MLACommonBaseImpl._gather_fp8_ds_mla_context(
+        layer,
+        torch.empty((1, 64, 656), dtype=torch.uint8),
+        torch.empty((1, 512), dtype=torch.bfloat16),
+        torch.empty((1, 1), dtype=torch.int32),
+        torch.empty((1,), dtype=torch.int32),
+        1,
+        torch.empty((1,), dtype=torch.int32),
+    )
+
+    assert calls == ["vllm"]
 
 
 # Remove sm100 backends from the list if not using sm100

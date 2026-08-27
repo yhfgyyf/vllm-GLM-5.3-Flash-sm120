@@ -263,6 +263,34 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_sm120_glm_nope() -> bool:
+    """Return ``True`` if FlashInfer has the SM120 GLM NoPE sparse MLA API."""
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+        from flashinfer.mla._sparse_mla_sm120_cache import (
+            glm_nope_gather_and_dequantize,
+            glm_nope_quantize_and_cache,
+        )
+    except ImportError:
+        return False
+    try:
+        params = inspect.signature(
+            trtllm_batch_decode_with_kv_cache_mla
+        ).parameters
+    except (TypeError, ValueError):
+        return False
+    return (
+        "kv_scale_format" in params
+        and callable(glm_nope_gather_and_dequantize)
+        and callable(glm_nope_quantize_and_cache)
+    )
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
@@ -1071,6 +1099,8 @@ __all__ = [
     "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
     "has_flashinfer_moe",
+    "has_flashinfer_sparse_mla_sm120",
+    "has_flashinfer_sparse_mla_sm120_glm_nope",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",

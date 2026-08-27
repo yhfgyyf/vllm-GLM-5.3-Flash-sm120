@@ -307,6 +307,38 @@ logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 
+_GLM_NOPE_MODEL_TYPES = {"glm5_next", "glm5_next_text"}
+
+
+def _get_hf_text_config(model_config: object | None) -> object | None:
+    if model_config is None:
+        return None
+    return getattr(model_config, "hf_text_config", None) or getattr(
+        model_config, "hf_config", None
+    )
+
+
+def _is_glm_nope_layout_config(
+    model_config: object | None,
+    *,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    kv_lora_rank: int,
+    head_size: int,
+) -> bool:
+    hf_text_config = _get_hf_text_config(model_config)
+    model_type = getattr(hf_text_config, "model_type", None)
+    return (
+        model_type in _GLM_NOPE_MODEL_TYPES
+        and getattr(hf_text_config, "qk_nope_head_dim", qk_nope_head_dim) == 256
+        and getattr(hf_text_config, "qk_rope_head_dim", qk_rope_head_dim) == 0
+        and getattr(hf_text_config, "kv_lora_rank", kv_lora_rank) == 512
+        and qk_nope_head_dim == 256
+        and qk_rope_head_dim == 0
+        and kv_lora_rank == 512
+        and head_size == 512
+    )
+
 
 def _detect_output_quant_key(
     output: torch.Tensor,
@@ -1142,6 +1174,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        model_version = None
+        if (
+            vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+            and _is_glm_nope_layout_config(
+                vllm_config.model_config,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                head_size=self.head_size,
+            )
+        ):
+            model_version = "glm_nope"
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
@@ -1156,6 +1200,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # whose kernel page layout (656 B/token) differs from
             # head_size * dtype_size.
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            model_version=model_version,
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -2570,6 +2615,45 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             k[..., k_nope.shape[-1] :] = k_pe
         return k
 
+    def _gather_fp8_ds_mla_context(
+        self,
+        src_cache: torch.Tensor,
+        dst: torch.Tensor,
+        block_table: torch.Tensor,
+        workspace_starts: torch.Tensor,
+        batch_size: int,
+        seq_starts: torch.Tensor,
+    ) -> None:
+        if (
+            self.kv_cache_dtype == "fp8_ds_mla"
+            and self.qk_nope_head_dim == 256
+            and self.qk_rope_head_dim == 0
+            and self.kv_lora_rank == 512
+            and src_cache.shape[-1] == 528
+            and dst.shape[-1] == 512
+        ):
+            from flashinfer.mla._sparse_mla_sm120_cache import (
+                glm_nope_gather_and_dequantize,
+            )
+
+            glm_nope_gather_and_dequantize(
+                src_cache.view(torch.uint8),
+                dst,
+                block_table,
+                workspace_starts,
+                batch_size,
+                seq_starts,
+            )
+            return
+        ops.cp_gather_and_upconvert_fp8_kv_cache(
+            src_cache=src_cache,
+            dst=dst,
+            block_table=block_table,
+            workspace_starts=workspace_starts,
+            batch_size=batch_size,
+            seq_starts=seq_starts,
+        )
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -2598,13 +2682,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             toks = chunk.num_context_tokens
             block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
-                ops.cp_gather_and_upconvert_fp8_kv_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace[:toks],
-                    block_table=block_table,
-                    workspace_starts=chunk.cu_seq_lens,
-                    batch_size=chunk.num_requests,
-                    seq_starts=chunk.starts,
+                self._gather_fp8_ds_mla_context(
+                    kv_c_and_k_pe_cache,
+                    workspace[:toks],
+                    block_table,
+                    chunk.cu_seq_lens,
+                    chunk.num_requests,
+                    chunk.starts,
                 )
             elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
@@ -2707,13 +2791,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             padded_local_cu_seq_lens = chunk.padded_local_cu_seq_lens
             block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
-                ops.cp_gather_and_upconvert_fp8_kv_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace[:toks],
-                    block_table=block_table,
-                    workspace_starts=padded_local_cu_seq_lens,
-                    batch_size=chunk.num_requests,
-                    seq_starts=chunk.starts,
+                self._gather_fp8_ds_mla_context(
+                    kv_c_and_k_pe_cache,
+                    workspace[:toks],
+                    block_table,
+                    padded_local_cu_seq_lens,
+                    chunk.num_requests,
+                    chunk.starts,
                 )
             elif is_quantized_kv_cache(self.kv_cache_dtype):
                 assert k_scale is not None

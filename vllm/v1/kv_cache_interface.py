@@ -440,6 +440,9 @@ class MLAAttentionSpec(FullAttentionSpec):
                 # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
                 # head_size stays semantic (512); bytes are determined here.
                 return self.storage_block_size * 584
+            if self.model_version == "glm_nope":
+                # GLM NoPE: 512B FP8 latent + 16B fp32 tile scales per token.
+                return self.storage_block_size * 528
             # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
             # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
             return self.block_size * 656
@@ -675,12 +678,15 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.model_version == "deepseek_v4" and self.cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 FlashMLA: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B
-            # per token. FlashInfer's contiguous bf16/fp8 cache falls through to
-            # the element-size formula below.
-            return self.storage_block_size * 584
-        assert self.model_version in (None, "deepseek_v4"), (
+        if self.cache_dtype_str == "fp8_ds_mla":
+            if self.model_version == "deepseek_v4":
+                # DeepseekV4 FlashMLA: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B
+                # per token. FlashInfer's contiguous bf16/fp8 cache falls through to
+                # the element-size formula below.
+                return self.storage_block_size * 584
+            if self.model_version == "glm_nope":
+                return self.storage_block_size * 528
+        assert self.model_version in (None, "deepseek_v4", "glm_nope"), (
             f"Unsupported model version: {self.model_version}"
         )
         return (
