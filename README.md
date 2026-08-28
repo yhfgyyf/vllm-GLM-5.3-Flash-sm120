@@ -52,9 +52,7 @@ uv venv --python 3.12 --seed
 source .venv/bin/activate
 
 gh release download --repo yhfgyyf/vllm-GLM-5.3-Flash-sm120 \
-  --pattern '*.tar.gz' \
-  --pattern 'MANIFEST.json' \
-  --pattern 'SHA256SUMS' \
+  --archive tar.gz \
   --dir /tmp/vllm-glm53-release
 
 tar -xzf /tmp/vllm-glm53-release/*.tar.gz -C /tmp/vllm-glm53-release
