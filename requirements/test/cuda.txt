@@ -1398,7 +1398,7 @@ xgrammar==0.2.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-xxhash==3.5.0
+xxhash==4.0.1
     # via
     #   datasets
     #   evaluate
