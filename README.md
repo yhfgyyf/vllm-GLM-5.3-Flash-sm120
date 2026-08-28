@@ -1,110 +1,175 @@
-<!-- markdownlint-disable MD001 MD041 -->
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-light.png" width=55%>
-  </picture>
-</p>
+# GLM-5.3-Flash on SM120 (RTX PRO 6000 Blackwell) — vLLM fork
 
-<h3 align="center">
-Easy, fast, and cheap LLM serving for everyone
-</h3>
+<!-- markdownlint-disable MD060 -->
 
-<p align="center">
-| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
-</p>
+> English version: [`README_EN.md`](README_EN.md)
+> 本仓库基于 [vllm-project/vllm](https://github.com/vllm-project/vllm)，选择性合入 GLM-5.3-Flash / PR #53906 相关改动，并保留 SM120 上的 FlashInfer NoPE sparse MLA 适配。
 
-🔥 We have built a vLLM website to help you get started with vLLM. Please visit [vllm.ai](https://vllm.ai) to learn more.
-For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
+把 vLLM 的 **GLM-5.3-Flash** 推理扩展到 **SM120**（RTX PRO 6000 Blackwell / 服务器 Blackwell 平台）。当前代码已按 **4 张 RTX PRO 6000**、TP4、FP8 KV cache、MTP 5 tokens、CUDA Graph 的配置验证过长上下文、prefix caching、serving 和数值测试。
 
----
+## Changelog
 
-## About
+### 2026-08-28
 
-vLLM is a fast and easy-to-use library for LLM inference and serving.
+- 选择性合入 GLM-5.3-Flash / PR #53906 的模型入口、hybrid cache、kpool sparse indexer、MTP 以及 serving 相关更新。
+- 保留并验证 SM120 FlashInfer NoPE sparse MLA 路径，包括 `FLASHINFER_MLA_SPARSE_SM120`、`has_flashinfer_sparse_mla_sm120()` 和 `has_flashinfer_sparse_mla_sm120_glm_nope()`。
+- 推荐稳定配置为 `max-num-batched-tokens=4096`、`enable-prefix-caching`、`block-size=2304`、`gpu-memory-utilization=0.97`、`max-num-seqs=4`、`max-model-len=auto`。
+- 已验证 256K / 784K 长上下文、prefix cache 命中、MTP 5 tokens、以及 4 卡 serve 的启动与稳定运行。
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has grown into one of the most active open-source AI projects built and maintained by a diverse community of many dozens of academic institutions and companies from over 2000 contributors.
+## 背景:为什么需要这个 fork
 
-vLLM is fast with:
+GLM-5.3-Flash 的 NoPE / sparse MLA 路径需要同时满足以下约束:
 
-- State-of-the-art serving throughput
-- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
-- Continuous batching of incoming requests, chunked prefill, prefix caching
-- Fast and flexible model execution with piecewise and full CUDA/HIP graphs
-- Quantization: FP8, MXFP8/MXFP4, NVFP4, INT8, INT4, GPTQ/AWQ, GGUF, compressed-tensors, ModelOpt, TorchAO, and [more](https://docs.vllm.ai/en/latest/features/quantization/index.html)
-- Optimized attention kernels including FlashAttention, FlashInfer, TRTLLM-GEN, FlashMLA, and Triton
-- Optimized GEMM/MoE kernels for various precisions using CUTLASS, TRTLLM-GEN, CuTeDSL
-- Speculative decoding including n-gram, suffix, EAGLE, DFlash
-- Automatic kernel generation and graph-level transformations using torch.compile
-- Disaggregated prefill, decode, and encode
+- GLM NoPE 的 `qk_rope_head_dim=0` 分支不能误走普通 MLA / RoPE 路径。
+- SM120 上的 FlashInfer sparse MLA 需要专门的 backend 选择与 warmup。
+- kpool sparse indexer、状态页大小、以及 FlashInfer / DeepGEMM 的 page 对齐必须同时成立。
+- MTP 与 prefix caching 会影响实际的长上下文吞吐和可用容量，需要在 README 中明确可复现配置。
 
-vLLM is flexible and easy to use with:
+### 关键代码路径
 
-- Seamless integration with popular Hugging Face models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor, pipeline, data, expert, and context parallelism for distributed inference
-- Streaming outputs
-- Generation of structured outputs using xgrammar or guidance
-- Tool calling and reasoning parsers
-- OpenAI-compatible API server, plus Anthropic Messages API and gRPC support
-- Efficient multi-LoRA support for dense and MoE layers
-- Support for NVIDIA GPUs, AMD GPUs, Intel GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
+- `vllm/platforms/cuda.py` - SM120 backend 选择和 GLM NoPE 分发
+- `vllm/utils/flashinfer.py` - FlashInfer 能力检测
+- `vllm/model_executor/layers/sparse_attn_indexer_kpool.py` - kpool sparse indexer
+- `vllm/models/glm5next/nvidia/attention.py` - GLM-5.3-Flash attention path
+- `tests/v1/attention/test_flashinfer_sparse_mla_sm120_api.py` - backend / API coverage
 
-vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
+## 已验证环境
 
-- Decoder-only LLMs (e.g., Llama, Qwen, Gemma)
-- Mixture-of-Expert LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
-- Hybrid attention and state-space models (e.g., Mamba, Qwen3.5)
-- Multi-modal models (e.g., LLaVA, Qwen-VL, Pixtral)
-- Embedding and retrieval models (e.g., E5-Mistral, GTE, ColBERT)
-- Reward and classification models (e.g., Qwen-Math)
+| 项 | 版本 |
+|---|---|
+| GPU | 4× RTX PRO 6000 Blackwell |
+| 平台 | SM120 |
+| Python | 3.12 |
+| CUDA toolkit | 13.x |
+| torch | cu130 系列 |
+| FlashInfer | SM120 NoPE sparse MLA fork |
+| vLLM | 当前 GLM-5.3-Flash integration branch |
 
-Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
-
-## Getting Started
-
-Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
+## 3. 快速安装(最新 Release，免手工拼装)
 
 ```bash
-uv pip install vllm
+uv venv --python 3.12 --seed
+source .venv/bin/activate
+
+gh release download --repo yhfgyyf/vllm-GLM-5.3-Flash-sm120 \
+  --pattern '*.tar.gz' \
+  --pattern 'MANIFEST.json' \
+  --pattern 'SHA256SUMS' \
+  --dir /tmp/vllm-glm53-release
+
+tar -xzf /tmp/vllm-glm53-release/*.tar.gz -C /tmp/vllm-glm53-release
+cd /tmp/vllm-glm53-release/vllm-GLM-5.3-Flash-sm120-*
+
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
+uv pip install -r requirements/build/cuda.txt --torch-backend=cu130
 ```
 
-Or [build from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for development.
+如果你想直接从源码树编译，也可以跳到下一节。
 
-Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
+## 4. 源码安装(clone 本仓库编译)
 
-- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
-- [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
-- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
+### 4.1 Python 环境
 
-## Contributing
-
-We welcome and value any contributions and collaborations.
-Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contributing/index.html) for how to get involved.
-
-## Citation
-
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
-
-```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
-}
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
+uv pip install torch --torch-backend=cu130
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
+uv pip install -r requirements/build/cuda.txt --torch-backend=cu130
 ```
 
-## Contact Us
+### 4.2 clone 本仓库
 
-<!-- --8<-- [start:contact-us] -->
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues)
-- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
-- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
-- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
-- For collaborations and partnerships, please contact us at [collaboration@vllm.ai](mailto:collaboration@vllm.ai)
-<!-- --8<-- [end:contact-us] -->
+```bash
+git clone https://github.com/yhfgyyf/vllm-GLM-5.3-Flash-sm120.git
+cd vllm-GLM-5.3-Flash-sm120
+```
 
-## Media Kit
+### 4.3 编译 / 打包
 
-- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+```bash
+export CUDA_HOME=/usr/local/cuda
+export VLLM_TARGET_DEVICE=cuda
+export VLLM_MAIN_CUDA_VERSION=13.0
+export TORCH_CUDA_ARCH_LIST="12.0"
+export MAX_JOBS=8
+
+./build_wheel.sh
+uv pip install --force-reinstall --no-deps dist/*.whl
+```
+
+## 5. 算子级自检(无需起完整模型)
+
+```python
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    has_flashinfer_sparse_mla_sm120,
+    has_flashinfer_sparse_mla_sm120_glm_nope,
+)
+
+print("cap:", current_platform.get_device_capability())
+print("flashinfer sparse MLA SM120:", has_flashinfer_sparse_mla_sm120())
+print("flashinfer GLM NoPE sparse MLA:", has_flashinfer_sparse_mla_sm120_glm_nope())
+```
+
+## 6. 部署(vllm serve)
+
+### 6.1 源模型
+
+```bash
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+vllm serve /path/to/GLM-5.3-Flash \
+  --served-model-name glm53-flash \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype fp8 \
+  --block-size 2304 \
+  --max-model-len auto \
+  --gpu-memory-utilization 0.97 \
+  --max-num-seqs 4 \
+  --max-num-batched-tokens 4096 \
+  --enable-prefix-caching \
+  --enable-auto-tool-choice \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+  --port 8000
+```
+
+### 6.2 关键启动信号
+
+- 日志里应能看到 `FLASHINFER_MLA_SPARSE_SM120`
+- prefix caching 应正常命中
+- CUDA Graph 应完成 capture
+- MTP 5 tokens 应保持稳定
+
+## 7. 测试结果(4× RTX PRO 6000)
+
+### 7.1 推理正确性
+
+```text
+Q: 用一句话介绍长城。
+A: 长城是中国古代为抵御北方游牧民族入侵而修筑的、横跨多个朝代、绵延数千公里的军事防御工程。
+```
+
+### 7.2 长上下文与 prefix caching
+
+| 输入 | 配置 | 结果 |
+|---|---|---|
+| 256K | `prefix caching on`, `chunked prefill 4096` | 稳定启动，重复请求命中率约 98.44% |
+| 784K | `prefix caching on`, `chunked prefill 4096` | 稳定启动，重复请求命中率约 99.59% |
+
+### 7.3 稳定配置
+
+| 参数 | 值 |
+|---|---|
+| `max-num-batched-tokens` | `4096` |
+| `enable-prefix-caching` | `true` |
+| `block-size` | `2304` |
+| `gpu-memory-utilization` | `0.97` |
+| `max-num-seqs` | `4` |
+| `max-model-len` | `auto` |
+
+## 8. 许可 / 来源
+
+代码基于 [vllm-project/vllm](https://github.com/vllm-project/vllm)（Apache-2.0）及其 GLM-5.3-Flash 相关集成。
