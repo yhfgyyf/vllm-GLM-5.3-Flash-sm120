@@ -74,7 +74,7 @@ gh release download --repo yhfgyyf/vllm-GLM-5.3-Flash-sm120 \
 cd /tmp/vllm-glm53-release
 sha256sum -c SHA256SUMS
 UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
-  uv pip install ./flashinfer_python-*.whl ./vllm-*.whl \
+  uv pip install ./vllm-*.whl \
   --torch-backend=cu130
 ```
 
