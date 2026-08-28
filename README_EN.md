@@ -24,11 +24,11 @@ cache, five MTP tokens, CUDA Graph, prefix caching, and long-context serving.
   including `FLASHINFER_MLA_SPARSE_SM120` and its capability checks.
 - Validated 256K and 784K inputs with 512 output tokens, prefix-cache reuse,
   MTP with five tokens, CUDA Graph capture, and structured tool calls.
-- Selected `max-num-batched-tokens=4096`, `block-size=2304`,
+- Selected `max-num-batched-tokens=8192`, `block-size=2304`,
   `gpu-memory-utilization=0.97`, `max-num-seqs=4`, and
   `max-model-len=auto` as the stable tested configuration.
-- This release is source-only. It does not include wheels or model weights
-  and must be paired with the
+- This release provides paired vLLM and FlashInfer wheels. It does not include
+  model weights and must be paired with the
   [`glm53-flash-nope-sm120`](https://github.com/yhfgyyf/flashinfer/tree/glm53-flash-nope-sm120)
   FlashInfer branch.
 
@@ -39,7 +39,6 @@ cache, five MTP tokens, CUDA Graph, prefix caching, and long-context serving.
 | vLLM PR #53906 | `933876c388` |
 | Validated vLLM SM120 integration | `da2f75cdd9` |
 | FlashInfer SM120 NoPE kernel | `b338a943` |
-| FlashInfer TP8/H8 operator tests | `def89fa6` |
 
 ## Why this fork exists
 
@@ -70,88 +69,34 @@ Important code paths include:
 | Python | 3.12.14 |
 | CUDA toolkit | 13.0 |
 | PyTorch / Triton | 2.13.0+cu130 / 3.7.1 |
-| FlashInfer | flashinfer-python 0.6.18 source; cubin 0.6.17 |
-| vLLM runtime | 0.27.2rc1.dev53906+precompiled plus this source tree |
+| FlashInfer | flashinfer-python 0.6.18 wheel; cubin 0.6.17 |
+| vLLM runtime | 0.27.2rc1.dev53906 wheel |
 
-## Download the paired source release
+## Install from GitHub Release wheels
 
 ```bash
 uv venv --python 3.12 --seed
 source .venv/bin/activate
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
+  uv pip install torch==2.13.0 --torch-backend=cu130
 
 gh release download --repo yhfgyyf/vllm-GLM-5.3-Flash-sm120 \
-  --pattern 'vllm-*-source-*.tar.gz' \
-  --pattern 'flashinfer-*-source-*.tar.gz' \
-  --pattern MANIFEST.json \
+  --pattern 'flashinfer_python-*.whl' \
+  --pattern 'vllm-*.whl' \
   --pattern SHA256SUMS \
   --dir /tmp/vllm-glm53-release
 
 cd /tmp/vllm-glm53-release
 sha256sum -c SHA256SUMS
-tar -xzf vllm-*-source-*.tar.gz
-tar -xzf flashinfer-*-source-*.tar.gz
-```
-
-The attached tarballs are source archives, not prebuilt wheels. GitHub's
-automatically generated “Source code” archive contains only vLLM; use both
-attached tarballs for the tested vLLM / FlashInfer pairing.
-
-## Install from source
-
-### Create the environment
-
-```bash
-uv venv --python 3.12
-source .venv/bin/activate
 UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
-  uv pip install torch==2.13.0 --torch-backend=cu130
-```
-
-### Clone and install the paired branches
-
-```bash
-git clone --branch glm53-flash-nope-sm120 --recursive \
-  https://github.com/yhfgyyf/flashinfer.git flashinfer-glm53-sm120
-git clone https://github.com/yhfgyyf/vllm-GLM-5.3-Flash-sm120.git
-
-cd flashinfer-glm53-sm120
-UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
-  uv pip install -r requirements.txt
-UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
-  uv pip install --no-build-isolation -e . -v
-
-cd ../vllm-GLM-5.3-Flash-sm120
-VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
-
-export VLLM_GLM53_SRC="$PWD"
-export FLASHINFER_GLM53_SRC="$(cd ../flashinfer-glm53-sm120 && pwd)"
-export PYTHONPATH="$FLASHINFER_GLM53_SRC:$VLLM_GLM53_SRC"
-export FLASHINFER_DISABLE_VERSION_CHECK=1
-```
-
-For a full vLLM CUDA-extension build, follow
-[`docs/contributing/incremental_build.md`](docs/contributing/incremental_build.md).
-This repository does not contain a `build_wheel.sh` script.
-
-## Operator sanity check
-
-```python
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_sparse_mla_sm120,
-    has_flashinfer_sparse_mla_sm120_glm_nope,
-)
-
-print("cap:", current_platform.get_device_capability())
-print("flashinfer sparse MLA SM120:", has_flashinfer_sparse_mla_sm120())
-print("flashinfer GLM NoPE sparse MLA:", has_flashinfer_sparse_mla_sm120_glm_nope())
+  uv pip install ./flashinfer_python-*.whl ./vllm-*.whl \
+  --torch-backend=cu130
 ```
 
 ## Serve the model
 
 ```bash
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-export PYTHONPATH=/path/to/flashinfer-glm53-sm120:/path/to/vllm-GLM-5.3-Flash-sm120
 export FLASHINFER_JIT_DIR=/path/to/writable/flashinfer-jit
 export FLASHINFER_WORKSPACE_BASE=/path/to/writable/flashinfer-jit
 
@@ -164,16 +109,13 @@ vllm serve /path/to/GLM-5.3-Flash \
   --max-model-len auto \
   --gpu-memory-utilization 0.97 \
   --max-num-seqs 4 \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --enable-auto-tool-choice \
   --tool-call-parser glm47 \
   --reasoning-parser glm45 \
   --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
 ```
-
-The startup log should select `FLASHINFER_MLA_SPARSE_SM120`, complete CUDA
-Graph capture, and report a healthy endpoint.
 
 ## Validation results (4× RTX PRO 6000)
 
@@ -198,37 +140,12 @@ The 4096-token configuration increased automatic KV capacity from 822,528 to
 | 256K | 98.4375% | 1.308 s |
 | 784K | 99.5855% | 3.117 s |
 
-### TP8 / H8 status
-
-The model has 64 global heads, so TP4 uses 16 heads per rank and TP8 would use
-8. The paired FlashInfer branch passes H8 and H16 prefill/decode numerical
-tests (`4 passed, 2 warnings in 29.01s`). The available host has four GPUs, so
-this validates the H8 operator/API path, not an end-to-end TP8 deployment.
-
-### Why `block-size=2304` is required for the tested TP4 setup
-
-- vLLM raises `--block-size 256` to 1792, but `1792 × 528 = 946176` bytes is
-  smaller than the 1,146,880-byte hybrid-cache state page, so KV-cache
-  initialization fails.
-- 2176 fits the state page, but `2176 / index_kpool(4) = 544` maps to
-  `block_kv=32`; the SM120 DeepGEMM FP8 paged-MQA path accepts 64, so profiling
-  fails.
-- The current path needs a manager block divisible by `index_kpool × 64 = 256`.
-  The smallest such value at or above `ceil(1146880 / 528) = 2173` is 2304.
-
-The “mamba state page” wording comes from vLLM's generic cache abstraction and
-does not mean that Kimi-K3-specific KDA state is present in GLM's MLA KV cache.
-The 2304 result applies to this TP4/FP8 geometry and must be revalidated when
-the tensor-parallel size changes.
-
 ## Release contents and limitations
 
-- Release assets contain the paired vLLM and FlashInfer source tarballs,
-  `MANIFEST.json`, and `SHA256SUMS`; they do not contain model weights, wheels,
-  or a compiled JIT cache.
+- Release assets contain paired vLLM and FlashInfer wheels and `SHA256SUMS`;
+  they do not contain model weights or a compiled JIT cache.
 - `gpu-memory-utilization=0.98` hit OOM during long-context sparse-indexer
   profiling/requests, so 0.97 is the stable recommendation.
-- DCP and end-to-end TP8 serving were not tested in this run.
 - AI assistance was used for code and test work. A human submitter must still
   understand and review every change before proposing it upstream.
 
